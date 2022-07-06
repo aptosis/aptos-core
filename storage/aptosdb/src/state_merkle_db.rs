@@ -14,25 +14,53 @@ use aptos_types::{
     transaction::Version,
 };
 use schemadb::{SchemaBatch, DB};
+use state_store::{lru_node_cache::LruNodeCache, versioned_node_cache::VersionedNodeCache},
 use std::{collections::HashMap, ops::Deref, sync::Arc};
 
 pub(crate) type LeafNode = aptos_jellyfish_merkle::node_type::LeafNode<StateKey>;
 pub(crate) type Node = aptos_jellyfish_merkle::node_type::Node<StateKey>;
 type NodeBatch = aptos_jellyfish_merkle::NodeBatch<StateKey>;
 
+pub static LRU_CACHE: Lazy<Histogram> =
+    Lazy::new(|| register_histogram!("lru_cache_hit", "JMT lru cache hit latency.").unwrap());
+pub static VERSION_CACHE: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!("version_cache_hit", "JMT version cache hit latency.").unwrap()
+});
+pub static CACHE_MISS_TOTAL: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!("cache_miss_total", "JMT lru cache miss total latency.").unwrap()
+});
+
+pub static CACHE_MISS_READ: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!("cache_miss_read", "JMT lru cache miss read latency.").unwrap()
+});
+
+pub static PROOF_READ: Lazy<Histogram> =
+    Lazy::new(|| register_histogram!("proof_read", "proof read latency.").unwrap());
+
+pub static VALUE_READ: Lazy<Histogram> =
+    Lazy::new(|| register_histogram!("value_read", "value read latency.").unwrap());
+
 #[derive(Debug)]
-pub struct StateMerkleDb(Arc<DB>);
+pub struct StateMerkleDb{
+    db: Arc<DB>,
+    version_cache: VersionedNodeCache,
+    lru_cache: LruNodeCache,
+}
 
 impl Deref for StateMerkleDb {
     type Target = DB;
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.db
     }
 }
 
 impl StateMerkleDb {
     pub fn new(state_merkle_rocksdb: Arc<DB>) -> Self {
-        Self(state_merkle_rocksdb)
+        Self {
+            db: state_merkle_rocksdb,
+            version_cache: VersionedNodeCache::new(),
+            lru_cache: LruNodeCache::new(4 * 1024 * 128),
+        }
     }
 
     pub fn get_with_proof(
@@ -101,7 +129,42 @@ impl StateMerkleDb {
 
 impl TreeReader<StateKey> for StateMerkleDb {
     fn get_node_option(&self, node_key: &NodeKey) -> Result<Option<Node>> {
-        self.get::<JellyfishMerkleNodeSchema>(node_key)
+        let mut t = Instant::now();
+        if (VERSION_CACHE.get_sample_count()
+            + LRU_CACHE.get_sample_count()
+            + CACHE_MISS_TOTAL.get_sample_count())
+        .checked_rem(131072)
+            == Some(0)
+        {
+            println!("version_cache_hit: {} {}, lru_cache: {}, {}, version_cache_miss: {}, {}, cache_miss_total: {}, {}",
+                VERSION_CACHE.get_sample_count(), VERSION_CACHE.get_sample_sum() / VERSION_CACHE.get_sample_count() as f64, LRU_CACHE.get_sample_count(), LRU_CACHE.get_sample_sum() / LRU_CACHE.get_sample_count() as f64, CACHE_MISS_READ.get_sample_count(), CACHE_MISS_READ.get_sample_sum() / CACHE_MISS_READ.get_sample_count() as f64, CACHE_MISS_TOTAL.get_sample_count(), CACHE_MISS_TOTAL.get_sample_sum() / CACHE_MISS_TOTAL.get_sample_count() as f64);
+            println!(
+                "proof read: {} {}, value read: {} {}",
+                PROOF_READ.get_sample_count(),
+                PROOF_READ.get_sample_sum() / PROOF_READ.get_sample_count() as f64,
+                VALUE_READ.get_sample_count(),
+                VALUE_READ.get_sample_sum() / VALUE_READ.get_sample_count() as f64
+            );
+        }
+        let node_opt = if let Some(node_cache) = self.version_cache.get_version(node_key.version())
+        {
+            node_cache.get(node_key).cloned()
+        } else {
+            CACHE_MISS_READ.observe(t.elapsed().as_secs_f64() * 1000000000.0);
+            t = Instant::now();
+            if let Some(node) = self.lru_cache.get(node_key) {
+                LRU_CACHE.observe(t.elapsed().as_secs_f64() * 1000000000.0);
+                Some(node)
+            } else {
+                let node_opt = self.get::<JellyfishMerkleNodeSchema>(node_key)?;
+                if let Some(node) = &node_opt {
+                    self.lru_cache.put(node_key.clone(), node.clone());
+                }
+                CACHE_MISS_TOTAL.observe(t.elapsed().as_secs_f64() * 1000000000.0);
+                node_opt
+            }
+        };
+        Ok(node_opt)
     }
 
     fn get_rightmost_leaf(&self) -> Result<Option<(NodeKey, LeafNode)>> {

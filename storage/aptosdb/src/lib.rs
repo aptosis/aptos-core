@@ -17,6 +17,7 @@ pub mod backup;
 pub mod errors;
 pub mod metrics;
 pub mod schema;
+pub mod state_store;
 
 mod change_set;
 mod db_options;
@@ -720,6 +721,11 @@ impl AptosDB {
             pruner.maybe_wake_pruner(latest_version)
         }
     }
+
+    #[cfg(feature = "fuzzing")]
+    pub fn state_store(&self) -> Arc<StateStore> {
+        self.state_store.clone()
+    }
 }
 
 impl DbReader for AptosDB {
@@ -741,7 +747,7 @@ impl DbReader for AptosDB {
             let version = ledger_info_with_sigs.ledger_info().version();
             let (blob, _proof) = self
                 .state_store
-                .get_state_value_with_proof_by_version(&state_key, version)?;
+                .get_state_value_with_proof_by_version(&state_key, version, &mut None, &mut None)?;
             Ok(blob)
         })
     }
@@ -1107,6 +1113,8 @@ impl DbReader for AptosDB {
         &self,
         state_store_key: &StateKey,
         version: Version,
+        counter: &mut Option<&mut [u128]>,
+        latency: &mut Option<&mut [u128]>,
     ) -> Result<(Option<StateValue>, SparseMerkleProof)> {
         gauged_api("get_state_value_with_proof_by_version", || {
             error_if_version_is_pruned(
@@ -1116,8 +1124,12 @@ impl DbReader for AptosDB {
                 version,
             )?;
 
-            self.state_store
-                .get_state_value_with_proof_by_version(state_store_key, version)
+            self.state_store.get_state_value_with_proof_by_version(
+                state_store_key,
+                version,
+                counter,
+                latency,
+            )
         })
     }
 
@@ -1259,7 +1271,7 @@ impl DbWriter for AptosDB {
         _state_tree_at_snapshot: SparseMerkleTree<StateValue>,
     ) -> Result<()> {
         gauged_api("save_state_snapshot", || {
-            let root_hash = self.state_store.merklize_value_set(
+            let root_hash = self.state_store.save_snapshot(
                 jmt_update_refs(&jmt_updates),
                 node_hashes,
                 version,
