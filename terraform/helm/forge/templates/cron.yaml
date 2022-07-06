@@ -5,7 +5,7 @@ metadata:
   labels:
     {{- include "forge.labels" . | nindent 4 }}
 spec:
-  schedule: "0 0 * * *"
+  schedule: "* * * * *"
   jobTemplate:
     spec:
       template:
@@ -19,7 +19,8 @@ spec:
             - /bin/sh
             - -c
             - |
-              # delete old forge jobs
-              kubectl delete job $(kubectl get job -l app.kubernetes.io/name=forge -o=jsonpath='{.items[?(@.status.succeeded==1)].metadata.name}')
-              exit 0
+              # get all dangling namespaces that are not "--keep "
+              kubectl get namespaces | grep forge-
+
+              kubectl get configmaps | grep forge-keep | awk '{ print $1 }'
           restartPolicy: OnFailure

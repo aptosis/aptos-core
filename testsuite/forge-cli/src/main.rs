@@ -91,6 +91,11 @@ struct K8sSwarm {
         help = "If set, uses kubectl port-forward instead of assuming k8s DNS access"
     )]
     port_forward: bool,
+    #[structopt(
+        long,
+        help = "If set, keeps the forge testnet active in the specified namespace"
+    )]
+    keep: bool,
 }
 
 #[derive(StructOpt, Debug)]
@@ -180,16 +185,18 @@ fn main() -> Result<()> {
                 run_forge(
                     test_suite,
                     K8sFactory::new(
-                        k8s.namespace,
+                        k8s.namespace.clone(),
                         k8s.image_tag,
                         k8s.base_image_tag,
                         k8s.port_forward,
+                        k8s.keep,
                     )
                     .unwrap(),
                     &args.options,
                     args.changelog,
                     global_emit_job_request,
-                )
+                )?;
+                Ok(())
             }
         },
         // cmd input for cluster operations

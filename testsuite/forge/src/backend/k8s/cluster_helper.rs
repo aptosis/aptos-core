@@ -9,7 +9,7 @@ use anyhow::{bail, format_err};
 use aptos_logger::info;
 use aptos_sdk::types::PeerId;
 use k8s_openapi::api::{
-    apps::v1::StatefulSet,
+    apps::v1::{Deployment, StatefulSet},
     batch::v1::Job,
     core::v1::{Namespace, PersistentVolumeClaim},
 };
@@ -159,18 +159,14 @@ pub(crate) async fn delete_k8s_cluster(kube_namespace: String) -> Result<()> {
     // if operating on the default namespace,
     match kube_namespace.as_str() {
         "default" => {
+            let deployments: Api<Deployment> = Api::namespaced(client.clone(), "default");
+            let stateful_sets: Api<StatefulSet> = Api::namespaced(client.clone(), "default");
             let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), "default");
 
             // delete all deployments and statefulsets
             // cross this with all the compute resources created by aptos-node helm chart
-            uninstall_helm_release(
-                APTOS_NODE_HELM_RELEASE_NAME.to_string(),
-                kube_namespace.clone(),
-            )?;
-            uninstall_helm_release(
-                GENESIS_HELM_RELEASE_NAME.to_string(),
-                kube_namespace.clone(),
-            )?;
+            delete_k8s_collection(deployments, "deployments").await?;
+            delete_k8s_collection(stateful_sets, "stateful_sets").await?;
             delete_k8s_collection(pvcs, "pvcs").await?;
         }
         s if s.starts_with("forge") => {
@@ -192,30 +188,6 @@ pub(crate) async fn delete_k8s_cluster(kube_namespace: String) -> Result<()> {
     Ok(())
 }
 
-fn uninstall_helm_release(release_name: String, kube_namespace: String) -> Result<()> {
-    let uninstall_args = [
-        "uninstall".to_string(),
-        "--namespace".to_string(),
-        kube_namespace.clone(),
-        "--keep-history".to_string(),
-        release_name.clone(),
-    ];
-    info!("{:?}", uninstall_args);
-    // do not error on exit code, as helm uninstall is not idempotent
-    let _uninstall_output = Command::new(HELM_BIN)
-        .stdout(Stdio::inherit())
-        .args(&uninstall_args)
-        .output()
-        .unwrap_or_else(|_| {
-            panic!(
-                "failed to helm uninstall release {} from namespace {}",
-                release_name, kube_namespace
-            )
-        });
-
-    Ok(())
-}
-
 fn upgrade_helm_release(
     release_name: String,
     helm_chart: String,
@@ -229,9 +201,10 @@ fn upgrade_helm_release(
     };
     let upgrade_base_args = [
         "upgrade".to_string(),
+        // "--debug".to_string(),
         "--install".to_string(),
-        // force replace if necessary
-        "--force".to_string(),
+        // // force replace if necessary
+        // "--force".to_string(),
         // in a new namespace
         "--create-namespace".to_string(),
         "--namespace".to_string(),
@@ -243,10 +216,9 @@ fn upgrade_helm_release(
         "--reuse-values".to_string(),
         "--history-max".to_string(),
         "2".to_string(),
-        "--set".to_string(),
-        psp_values.to_string(),
     ];
-    let upgrade_args = [&upgrade_base_args, options].concat();
+    let upgrade_override_args = ["--set".to_string(), psp_values.to_string()];
+    let upgrade_args = [&upgrade_base_args, options, &upgrade_override_args].concat();
     info!("{:?}", upgrade_args);
     let upgrade_output = Command::new(HELM_BIN)
         .stdout(Stdio::inherit())
@@ -348,13 +320,6 @@ pub async fn install_testnet_resources(
         format!("imageTag={}", &base_genesis_image_tag),
     ];
 
-    // TODO(rustielin): get the helm releases to be consistent
-    upgrade_aptos_node_helm(
-        APTOS_NODE_HELM_RELEASE_NAME.to_string(),
-        aptos_node_upgrade_options.as_slice(),
-        kube_namespace.clone(),
-    )?;
-
     let mut genesis_upgrade_options = vec![
         // use the old values
         "-f".to_string(),
@@ -383,6 +348,13 @@ pub async fn install_testnet_resources(
 
     // wait for genesis to run again, and get the updated validators
     wait_genesis_job(&kube_client, &new_era, &kube_namespace).await?;
+
+    // TODO(rustielin): get the helm releases to be consistent
+    upgrade_aptos_node_helm(
+        APTOS_NODE_HELM_RELEASE_NAME.to_string(),
+        aptos_node_upgrade_options.as_slice(),
+        kube_namespace.clone(),
+    )?;
 
     // get all validators
     let validators = get_validators(
