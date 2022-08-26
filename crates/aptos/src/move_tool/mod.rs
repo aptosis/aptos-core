@@ -4,6 +4,7 @@
 mod aptos_debug_natives;
 mod manifest;
 pub mod package_hooks;
+use aptos_sdk::move_types::ident_str;
 pub use package_hooks::*;
 pub mod stored_package;
 mod transactional_tests_runner;
@@ -462,6 +463,31 @@ impl IncludedArtifacts {
 
 pub const MAX_PUBLISH_PACKAGE_SIZE: usize = 60_000;
 
+/// Same as `publish_package` but as an entry function which can be called as a transaction. Because
+/// of current restrictions for txn parameters, the metadata needs to be passed in serialized form.
+pub fn deployer_publish_package_txn(
+    seed: Vec<u8>,
+    metadata_serialized: Vec<u8>,
+    code: Vec<Vec<u8>>,
+) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::from_hex_literal(
+                "0x1245d0cf838606de0efd8bdfcc80b80cb4198f589b14ecac66ccc83035102c00",
+            )
+            .unwrap(),
+            ident_str!("deployer").to_owned(),
+        ),
+        ident_str!("publish_package_txn").to_owned(),
+        vec![],
+        vec![
+            bcs::to_bytes(&seed).unwrap(),
+            bcs::to_bytes(&metadata_serialized).unwrap(),
+            bcs::to_bytes(&code).unwrap(),
+        ],
+    ))
+}
+
 #[async_trait]
 impl CliCommand<TransactionSummary> for PublishPackage {
     fn command_name(&self) -> &'static str {
@@ -491,10 +517,15 @@ impl CliCommand<TransactionSummary> for PublishPackage {
         } else {
             // Send the compiled module and metadata using the code::publish_package_txn.
             let metadata = package.extract_metadata()?;
-            let payload = cached_packages::aptos_stdlib::code_publish_package_txn(
-                bcs::to_bytes(&metadata).expect("PackageMetadata has BCS"),
+
+            let metadata_serialized = bcs::to_bytes(&metadata).expect("PackageMetadata has BCS");
+            // let payload = code_publish_package_txn(metadata_serialized, compiled_units);
+            let payload = deployer_publish_package_txn(
+                metadata.name.clone().into_bytes(),
+                metadata_serialized,
                 compiled_units,
             );
+
             let size = bcs::serialized_size(&payload)?;
             println!("package size {} bytes", size);
             if !override_size_check && size > MAX_PUBLISH_PACKAGE_SIZE {

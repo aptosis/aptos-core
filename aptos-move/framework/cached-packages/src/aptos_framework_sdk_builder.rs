@@ -156,6 +156,12 @@ pub enum EntryFunctionCall {
         coin_type: TypeTag,
     },
 
+    PublishPublishPackageTxn {
+        seed: Vec<u8>,
+        metadata_serialized: Vec<u8>,
+        code: Vec<Vec<u8>>,
+    },
+
     /// Creates a new resource account and rotates the authentication key to either
     /// the optional auth key if it is non-empty (though auth keys are 32-bytes)
     /// or the source accounts current auth key.
@@ -322,6 +328,11 @@ impl EntryFunctionCall {
                 amount,
             } => managed_coin_mint(coin_type, dst_addr, amount),
             ManagedCoinRegister { coin_type } => managed_coin_register(coin_type),
+            PublishPublishPackageTxn {
+                seed,
+                metadata_serialized,
+                code,
+            } => publish_publish_package_txn(seed, metadata_serialized, code),
             ResourceAccountCreateResourceAccount {
                 seed,
                 optional_auth_key,
@@ -739,6 +750,29 @@ pub fn managed_coin_register(coin_type: TypeTag) -> TransactionPayload {
         ident_str!("register").to_owned(),
         vec![coin_type],
         vec![],
+    ))
+}
+
+pub fn publish_publish_package_txn(
+    seed: Vec<u8>,
+    metadata_serialized: Vec<u8>,
+    code: Vec<Vec<u8>>,
+) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("publish").to_owned(),
+        ),
+        ident_str!("publish_package_txn").to_owned(),
+        vec![],
+        vec![
+            bcs::to_bytes(&seed).unwrap(),
+            bcs::to_bytes(&metadata_serialized).unwrap(),
+            bcs::to_bytes(&code).unwrap(),
+        ],
     ))
 }
 
@@ -1234,6 +1268,18 @@ mod decoder {
         }
     }
 
+    pub fn publish_publish_package_txn(payload: &TransactionPayload) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(EntryFunctionCall::PublishPublishPackageTxn {
+                seed: bcs::from_bytes(script.args().get(0)?).ok()?,
+                metadata_serialized: bcs::from_bytes(script.args().get(1)?).ok()?,
+                code: bcs::from_bytes(script.args().get(2)?).ok()?,
+            })
+        } else {
+            None
+        }
+    }
+
     pub fn resource_account_create_resource_account(
         payload: &TransactionPayload,
     ) -> Option<EntryFunctionCall> {
@@ -1476,6 +1522,10 @@ static SCRIPT_FUNCTION_DECODER_MAP: once_cell::sync::Lazy<EntryFunctionDecoderMa
         map.insert(
             "managed_coin_register".to_string(),
             Box::new(decoder::managed_coin_register),
+        );
+        map.insert(
+            "publish_publish_package_txn".to_string(),
+            Box::new(decoder::publish_publish_package_txn),
         );
         map.insert(
             "resource_account_create_resource_account".to_string(),
