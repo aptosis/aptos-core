@@ -473,7 +473,7 @@ pub fn deployer_publish_package_txn(
     TransactionPayload::EntryFunction(EntryFunction::new(
         ModuleId::new(
             AccountAddress::from_hex_literal(
-                "0x1245d0cf838606de0efd8bdfcc80b80cb4198f589b14ecac66ccc83035102c00",
+                "0x35bf5e9ec8b7a342900f55e4cc08ee1d7d90c7ae7daeaf19e298f11c957aba07",
             )
             .unwrap(),
             ident_str!("deployer").to_owned(),
